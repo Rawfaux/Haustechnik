@@ -17,6 +17,12 @@ export default function Personalverwaltung() {
   const [showDetailModal, setShowDetailModal] = useState(null)
   const [editingId, setEditingId] = useState(null)
   const [searchTerm, setSearchTerm] = useState('')
+  const [statusFilter, setStatusFilter] = useState('alle') // Filter: alle, active, inactive, ausgeschieden
+  const [showAusscheidenModal, setShowAusscheidenModal] = useState(null)
+  const [ausscheidenData, setAusscheidenData] = useState({
+    datum: new Date().toISOString().split('T')[0],
+    grund: ''
+  })
   const router = useRouter()
 
   const [formData, setFormData] = useState({
@@ -39,6 +45,15 @@ export default function Personalverwaltung() {
     status: 'active',
     user_id: '',
   })
+
+  // Account-Erstellung
+  const [createAccount, setCreateAccount] = useState(false)
+  const [accountData, setAccountData] = useState({
+    email: '',
+    password: '',
+    role: 'haustechniker',
+  })
+  const [creatingAccount, setCreatingAccount] = useState(false)
 
   useEffect(() => {
     const loadData = async () => {
@@ -75,25 +90,69 @@ export default function Personalverwaltung() {
       urlaubstage_jahr: 30, urlaubstage_genommen: 0, urlaubstage_vorjahr: 0,
       ueberstunden_konto: 0, status: 'active', user_id: '',
     })
+    setCreateAccount(false)
+    setAccountData({ email: '', password: '', role: 'haustechniker' })
     setEditingId(null)
     setShowForm(false)
   }
 
   const handleSave = async (e) => {
     e.preventDefault()
-    if (!formData.vorname || !formData.nachname) { alert('Vorname und Nachname sind erforderlich'); return }
-
-    const dataToSave = {
-      ...formData,
-      haupt_object_id: formData.haupt_object_id || null,
-      user_id: formData.user_id || null,
-      urlaubstage_jahr: parseInt(formData.urlaubstage_jahr) || 30,
-      urlaubstage_genommen: parseInt(formData.urlaubstage_genommen) || 0,
-      urlaubstage_vorjahr: parseInt(formData.urlaubstage_vorjahr) || 0,
-      ueberstunden_konto: parseFloat(formData.ueberstunden_konto) || 0,
+    if (!formData.vorname || !formData.nachname) { 
+      alert('Vorname und Nachname sind erforderlich')
+      return 
     }
 
+    // Validierung Account-Erstellung
+    if (createAccount && !editingId) {
+      if (!accountData.email || !accountData.password) {
+        alert('Email und Passwort sind erforderlich für Account-Erstellung')
+        return
+      }
+      if (accountData.password.length < 6) {
+        alert('Passwort muss mindestens 6 Zeichen haben')
+        return
+      }
+    }
+
+    setCreatingAccount(true)
+
     try {
+      let userId = formData.user_id
+
+      // Schritt 1: Account erstellen (wenn gewünscht und Neuanlage)
+      if (createAccount && !editingId) {
+        const response = await fetch('/api/admin/create-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            email: accountData.email,
+            password: accountData.password,
+            role: accountData.role,
+          }),
+        })
+
+        const result = await response.json()
+
+        if (!response.ok) {
+          throw new Error(result.error || 'Fehler beim Erstellen des Accounts')
+        }
+
+        userId = result.userId
+        alert('✅ Benutzer-Account erfolgreich erstellt!')
+      }
+
+      // Schritt 2: Mitarbeiter speichern
+      const dataToSave = {
+        ...formData,
+        haupt_object_id: formData.haupt_object_id || null,
+        user_id: userId || null,
+        urlaubstage_jahr: parseInt(formData.urlaubstage_jahr) || 30,
+        urlaubstage_genommen: parseInt(formData.urlaubstage_genommen) || 0,
+        urlaubstage_vorjahr: parseInt(formData.urlaubstage_vorjahr) || 0,
+        ueberstunden_konto: parseFloat(formData.ueberstunden_konto) || 0,
+      }
+
       if (editingId) {
         const { error } = await supabase.from('employees').update(dataToSave).eq('id', editingId)
         if (error) throw error
@@ -101,12 +160,19 @@ export default function Personalverwaltung() {
         const { error } = await supabase.from('employees').insert([dataToSave])
         if (error) throw error
       }
+
+      // Schritt 3: Liste aktualisieren
       const { data } = await supabase.from('employees').select('*').order('nachname')
       setEmployees(data || [])
+      
       resetForm()
-      alert(editingId ? 'Mitarbeiter aktualisiert!' : 'Mitarbeiter hinzugefuegt!')
+      alert(editingId ? '✅ Mitarbeiter aktualisiert!' : '✅ Mitarbeiter hinzugefügt!')
+      
     } catch (err) {
-      alert('Fehler: ' + err.message)
+      console.error('Fehler:', err)
+      alert('❌ Fehler: ' + err.message)
+    } finally {
+      setCreatingAccount(false)
     }
   }
 
@@ -143,6 +209,53 @@ export default function Personalverwaltung() {
     setShowDetailModal(null)
   }
 
+  const handleAusscheiden = async () => {
+    if (!ausscheidenData.datum || !ausscheidenData.grund) {
+      alert('Datum und Grund sind erforderlich')
+      return
+    }
+
+    if (!confirm(`${showAusscheidenModal.vorname} ${showAusscheidenModal.nachname} wirklich als ausgeschieden markieren?`)) {
+      return
+    }
+
+    try {
+      // 1. Mitarbeiter Status aktualisieren
+      const { error: empError } = await supabase
+        .from('employees')
+        .update({
+          status: 'ausgeschieden',
+          ausgeschieden_am: ausscheidenData.datum,
+          ausgeschieden_grund: ausscheidenData.grund,
+        })
+        .eq('id', showAusscheidenModal.id)
+
+      if (empError) throw empError
+
+      // 2. User-Account deaktivieren (falls vorhanden)
+      if (showAusscheidenModal.user_id) {
+        // User-Rolle auf 'deaktiviert' setzen
+        const { error: roleError } = await supabase
+          .from('user_roles')
+          .update({ role: 'deaktiviert' })
+          .eq('user_id', showAusscheidenModal.user_id)
+
+        if (roleError) console.error('Fehler beim Deaktivieren des Accounts:', roleError)
+      }
+
+      // 3. Liste aktualisieren
+      const { data } = await supabase.from('employees').select('*').order('nachname')
+      setEmployees(data || [])
+
+      setShowAusscheidenModal(null)
+      setAusscheidenData({ datum: new Date().toISOString().split('T')[0], grund: '' })
+      setShowDetailModal(null)
+      alert('✅ Mitarbeiter als ausgeschieden markiert!')
+    } catch (err) {
+      alert('❌ Fehler: ' + err.message)
+    }
+  }
+
   // Pruefen ob User bereits einem anderen Mitarbeiter zugewiesen ist
   const isUserAssigned = (userId) => {
     if (!userId) return false
@@ -159,6 +272,12 @@ export default function Personalverwaltung() {
   }
 
   const filteredEmployees = employees.filter(emp => {
+    // Status-Filter
+    if (statusFilter !== 'alle' && emp.status !== statusFilter) {
+      return false
+    }
+    
+    // Such-Filter
     if (!searchTerm) return true
     const search = searchTerm.toLowerCase()
     return emp.vorname?.toLowerCase().includes(search) ||
@@ -198,6 +317,18 @@ export default function Personalverwaltung() {
           <div className="flex-1 max-w-md">
             <input type="text" placeholder="Suchen (Name, Personal-Nr, Email...)" value={searchTerm} onChange={(e) => setSearchTerm(e.target.value)} className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white" />
           </div>
+          <div>
+            <select 
+              value={statusFilter} 
+              onChange={(e) => setStatusFilter(e.target.value)}
+              className="px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white font-semibold"
+            >
+              <option value="alle">📋 Alle Mitarbeiter</option>
+              <option value="active">✅ Aktiv</option>
+              <option value="inactive">⏸️ Inaktiv</option>
+              <option value="ausgeschieden">⚠️ Ausgeschieden</option>
+            </select>
+          </div>
         </div>
 
         {isAdmin && showForm && (
@@ -236,37 +367,157 @@ export default function Personalverwaltung() {
               </div>
               <div className="mb-6">
                 <h3 className="text-lg font-semibold text-gray-700 mb-3 border-b pb-2">🔐 System-Zuordnung</h3>
-                <div className="grid grid-cols-1 gap-4">
-                  <div>
-                    <label className="block text-gray-700 font-semibold mb-2">Benutzer-Account</label>
-                    <select 
-                      value={formData.user_id} 
-                      onChange={(e) => setFormData({ ...formData, user_id: e.target.value })} 
-                      className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
-                    >
-                      <option value="">-- Kein Account zugewiesen --</option>
-                      {users.map(u => {
-                        const assigned = isUserAssigned(u.user_id)
-                        const assignedTo = assigned ? employees.find(e => e.user_id === u.user_id) : null
-                        return (
-                          <option key={u.user_id} value={u.user_id} disabled={assigned}>
-                            {u.user_id.substring(0, 8)}... ({u.role})
-                            {assigned && assignedTo ? ` - bereits: ${assignedTo.vorname} ${assignedTo.nachname}` : ''}
-                          </option>
-                        )
-                      })}
-                    </select>
-                    <p className="text-gray-500 text-xs mt-1">
-                      Verknuepft diesen Mitarbeiter mit einem Login-Account. 
-                      Erforderlich fuer Urlaubsantraege und Krankmeldungen.
-                    </p>
-                    {formData.user_id && (
-                      <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
-                        ✓ Account zugewiesen - Mitarbeiter kann Antraege stellen
+                
+                {!editingId ? (
+                  /* NEUANLAGE: Account erstellen oder bestehenden zuweisen */
+                  <div className="grid grid-cols-1 gap-4">
+                    {/* Checkbox: Account erstellen */}
+                    <div className="bg-blue-50 border-2 border-blue-300 rounded-lg p-4">
+                      <label className="flex items-center cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={createAccount}
+                          onChange={(e) => {
+                            setCreateAccount(e.target.checked)
+                            if (e.target.checked) {
+                              // Email automatisch vorschlagen
+                              if (formData.vorname && formData.nachname && !accountData.email) {
+                                const suggestedEmail = `${formData.vorname.toLowerCase()}.${formData.nachname.toLowerCase()}@firma.de`
+                                setAccountData({ ...accountData, email: suggestedEmail })
+                              }
+                            }
+                          }}
+                          className="w-5 h-5 text-blue-600 mr-3"
+                        />
+                        <div>
+                          <span className="text-gray-900 font-bold text-lg">Benutzer-Account erstellen</span>
+                          <p className="text-gray-600 text-sm mt-1">
+                            Erstellt automatisch einen Login-Account für diesen Mitarbeiter
+                          </p>
+                        </div>
+                      </label>
+                    </div>
+
+                    {/* Account-Felder (nur wenn Checkbox aktiv) */}
+                    {createAccount && (
+                      <div className="bg-white border-2 border-blue-300 rounded-lg p-4 space-y-4">
+                        <div className="bg-blue-100 rounded p-3 text-blue-800 text-sm">
+                          <strong>ℹ️ Info:</strong> Der Mitarbeiter kann sich mit diesen Daten sofort einloggen.
+                        </div>
+
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div>
+                            <label className="block text-gray-700 font-semibold mb-2">
+                              Email * (Login-Name)
+                            </label>
+                            <input
+                              type="email"
+                              value={accountData.email}
+                              onChange={(e) => setAccountData({ ...accountData, email: e.target.value })}
+                              className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                              placeholder="max.mustermann@firma.de"
+                              required={createAccount}
+                            />
+                          </div>
+
+                          <div>
+                            <label className="block text-gray-700 font-semibold mb-2">
+                              Passwort * (mind. 6 Zeichen)
+                            </label>
+                            <input
+                              type="password"
+                              value={accountData.password}
+                              onChange={(e) => setAccountData({ ...accountData, password: e.target.value })}
+                              className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                              placeholder="••••••••"
+                              minLength={6}
+                              required={createAccount}
+                            />
+                          </div>
+                        </div>
+
+                        <div>
+                          <label className="block text-gray-700 font-semibold mb-2">
+                            Rolle *
+                          </label>
+                          <select
+                            value={accountData.role}
+                            onChange={(e) => setAccountData({ ...accountData, role: e.target.value })}
+                            className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                          >
+                            <option value="haustechniker">Haustechniker</option>
+                            <option value="objektleiter">Objektleiter</option>
+                            <option value="admin">Admin</option>
+                          </select>
+                          <p className="text-gray-500 text-xs mt-1">
+                            Legt fest welche Berechtigungen der Mitarbeiter hat
+                          </p>
+                        </div>
+                      </div>
+                    )}
+
+                    {/* Alternative: Bestehenden Account zuweisen */}
+                    {!createAccount && (
+                      <div>
+                        <label className="block text-gray-700 font-semibold mb-2">
+                          Oder: Bestehenden Account zuweisen
+                        </label>
+                        <select 
+                          value={formData.user_id} 
+                          onChange={(e) => setFormData({ ...formData, user_id: e.target.value })} 
+                          className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                        >
+                          <option value="">-- Kein Account zugewiesen --</option>
+                          {users.map(u => {
+                            const assigned = isUserAssigned(u.user_id)
+                            const assignedTo = assigned ? employees.find(e => e.user_id === u.user_id) : null
+                            return (
+                              <option key={u.user_id} value={u.user_id} disabled={assigned}>
+                                {u.user_id.substring(0, 8)}... ({u.role})
+                                {assigned && assignedTo ? ` - bereits: ${assignedTo.vorname} ${assignedTo.nachname}` : ''}
+                              </option>
+                            )
+                          })}
+                        </select>
+                        <p className="text-gray-500 text-xs mt-1">
+                          Falls der Mitarbeiter bereits einen Account hat
+                        </p>
                       </div>
                     )}
                   </div>
-                </div>
+                ) : (
+                  /* BEARBEITEN: Nur Account zuweisen */
+                  <div className="grid grid-cols-1 gap-4">
+                    <div>
+                      <label className="block text-gray-700 font-semibold mb-2">Benutzer-Account</label>
+                      <select 
+                        value={formData.user_id} 
+                        onChange={(e) => setFormData({ ...formData, user_id: e.target.value })} 
+                        className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                      >
+                        <option value="">-- Kein Account zugewiesen --</option>
+                        {users.map(u => {
+                          const assigned = isUserAssigned(u.user_id)
+                          const assignedTo = assigned ? employees.find(e => e.user_id === u.user_id) : null
+                          return (
+                            <option key={u.user_id} value={u.user_id} disabled={assigned}>
+                              {u.user_id.substring(0, 8)}... ({u.role})
+                              {assigned && assignedTo ? ` - bereits: ${assignedTo.vorname} ${assignedTo.nachname}` : ''}
+                            </option>
+                          )
+                        })}
+                      </select>
+                      <p className="text-gray-500 text-xs mt-1">
+                        Verknuepft diesen Mitarbeiter mit einem Login-Account
+                      </p>
+                      {formData.user_id && (
+                        <div className="mt-2 p-2 bg-green-50 border border-green-200 rounded text-green-700 text-sm">
+                          ✓ Account zugewiesen
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
               </div>
               <div className="mb-6">
                 <h3 className="text-lg font-semibold text-gray-700 mb-3 border-b pb-2">Objekt-Zuweisung</h3>
@@ -292,8 +543,21 @@ export default function Personalverwaltung() {
                 </div>
               </div>
               <div className="flex gap-2">
-                <button type="submit" className="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded font-semibold">Speichern</button>
-                <button type="button" onClick={resetForm} className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-2 rounded font-semibold">Abbrechen</button>
+                <button 
+                  type="submit" 
+                  disabled={creatingAccount}
+                  className="bg-green-500 hover:bg-green-600 text-white px-6 py-2 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  {creatingAccount ? '⏳ Erstelle Account...' : 'Speichern'}
+                </button>
+                <button 
+                  type="button" 
+                  onClick={resetForm} 
+                  disabled={creatingAccount}
+                  className="bg-gray-500 hover:bg-gray-600 text-white px-6 py-2 rounded font-semibold disabled:opacity-50"
+                >
+                  Abbrechen
+                </button>
               </div>
             </form>
           </div>
@@ -323,17 +587,80 @@ export default function Personalverwaltung() {
                   filteredEmployees.map((emp) => {
                     const resturlaub = getResturlaub(emp)
                     const ueberstunden = emp.ueberstunden_konto || 0
+                    
+                    // Lösch-Warnung berechnen
+                    let loeschWarnung = null
+                    if (emp.status === 'ausgeschieden' && emp.loeschbar_ab) {
+                      const heute = new Date()
+                      const loeschDatum = new Date(emp.loeschbar_ab)
+                      const tageNoch = Math.ceil((loeschDatum - heute) / (1000 * 60 * 60 * 24))
+                      
+                      if (tageNoch <= 0) {
+                        loeschWarnung = '🔴 JETZT LÖSCHBAR!'
+                      } else if (tageNoch <= 90) {
+                        loeschWarnung = `⚠️ In ${tageNoch} Tagen löschbar`
+                      }
+                    }
+                    
                     return (
-                      <tr key={emp.id} className="border-t border-gray-200 hover:bg-gray-50">
+                      <tr key={emp.id} className={`border-t border-gray-200 hover:bg-gray-50 ${emp.status === 'ausgeschieden' ? 'bg-red-50' : ''}`}>
                         <td className="px-4 py-3 text-gray-900 font-mono text-sm">{emp.personal_nr || '-'}</td>
-                        <td className="px-4 py-3"><p className="font-semibold text-gray-900">{emp.nachname}, {emp.vorname}</p><p className="text-gray-600 text-sm">{emp.job_titel || '-'}</p></td>
-                        <td className="px-4 py-3 text-gray-900">{emp.haupt_object_id ? getObjectName(emp.haupt_object_id) : '-'}</td>
-                        <td className="px-4 py-3"><span className={`px-2 py-1 rounded text-sm font-semibold ${resturlaub > 10 ? 'bg-green-100 text-green-800' : resturlaub > 5 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>{resturlaub} Tage</span></td>
-                        <td className="px-4 py-3"><span className={`px-2 py-1 rounded text-sm font-semibold ${ueberstunden >= 0 ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-800'}`}>{ueberstunden}h</span></td>
-                        <td className="px-4 py-3"><span className={`px-2 py-1 rounded text-xs font-semibold ${emp.status === 'active' ? 'bg-green-100 text-green-800' : 'bg-gray-100 text-gray-800'}`}>{emp.status === 'active' ? 'Aktiv' : 'Inaktiv'}</span></td>
                         <td className="px-4 py-3">
-                          <button onClick={() => setShowDetailModal(emp)} className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm mr-2">Details</button>
-                          {isAdmin && (<button onClick={() => handleEdit(emp)} className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1 rounded text-sm">Bearbeiten</button>)}
+                          <p className="font-semibold text-gray-900">{emp.nachname}, {emp.vorname}</p>
+                          <p className="text-gray-600 text-sm">{emp.job_titel || '-'}</p>
+                          {loeschWarnung && (
+                            <p className="text-xs font-bold text-red-600 mt-1">{loeschWarnung}</p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3 text-gray-900">{emp.haupt_object_id ? getObjectName(emp.haupt_object_id) : '-'}</td>
+                        <td className="px-4 py-3">
+                          {emp.status !== 'ausgeschieden' ? (
+                            <span className={`px-2 py-1 rounded text-sm font-semibold ${resturlaub > 10 ? 'bg-green-100 text-green-800' : resturlaub > 5 ? 'bg-yellow-100 text-yellow-800' : 'bg-red-100 text-red-800'}`}>
+                              {resturlaub} Tage
+                            </span>
+                          ) : (
+                            <span className="text-gray-400 text-sm">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          {emp.status !== 'ausgeschieden' ? (
+                            <span className={`px-2 py-1 rounded text-sm font-semibold ${ueberstunden >= 0 ? 'bg-blue-100 text-blue-800' : 'bg-red-100 text-red-800'}`}>
+                              {ueberstunden}h
+                            </span>
+                          ) : (
+                            <span className="text-gray-400 text-sm">-</span>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                            emp.status === 'active' ? 'bg-green-100 text-green-800' : 
+                            emp.status === 'inactive' ? 'bg-yellow-100 text-yellow-800' : 
+                            'bg-red-100 text-red-800'
+                          }`}>
+                            {emp.status === 'active' ? '✅ Aktiv' : 
+                             emp.status === 'inactive' ? '⏸️ Inaktiv' : 
+                             '⚠️ Ausgeschieden'}
+                          </span>
+                          {emp.status === 'ausgeschieden' && emp.ausgeschieden_am && (
+                            <p className="text-xs text-gray-600 mt-1">
+                              seit {new Date(emp.ausgeschieden_am).toLocaleDateString('de-DE')}
+                            </p>
+                          )}
+                        </td>
+                        <td className="px-4 py-3">
+                          <button onClick={() => setShowDetailModal(emp)} className="bg-blue-500 hover:bg-blue-600 text-white px-3 py-1 rounded text-sm mr-2 mb-1">
+                            Details
+                          </button>
+                          {isAdmin && emp.status !== 'ausgeschieden' && (
+                            <>
+                              <button onClick={() => handleEdit(emp)} className="bg-orange-500 hover:bg-orange-600 text-white px-3 py-1 rounded text-sm mr-2 mb-1">
+                                Bearbeiten
+                              </button>
+                              <button onClick={() => setShowAusscheidenModal(emp)} className="bg-red-500 hover:bg-red-600 text-white px-3 py-1 rounded text-sm mb-1">
+                                Ausscheiden
+                              </button>
+                            </>
+                          )}
                         </td>
                       </tr>
                     )
@@ -378,7 +705,49 @@ export default function Personalverwaltung() {
                 <p><strong>Firmenmail:</strong> {showDetailModal.firma_mail || '-'}</p>
                 <p><strong>Firmentelefon:</strong> {showDetailModal.firma_telefon || '-'}</p>
                 <p><strong>Einstiegsdatum:</strong> {showDetailModal.einstiegsdatum ? new Date(showDetailModal.einstiegsdatum).toLocaleDateString('de-DE') : '-'}</p>
+                <p><strong>Status:</strong> <span className={`px-2 py-1 rounded text-xs font-semibold ${
+                  showDetailModal.status === 'active' ? 'bg-green-100 text-green-800' : 
+                  showDetailModal.status === 'inactive' ? 'bg-yellow-100 text-yellow-800' : 
+                  'bg-red-100 text-red-800'
+                }`}>
+                  {showDetailModal.status === 'active' ? '✅ Aktiv' : 
+                   showDetailModal.status === 'inactive' ? '⏸️ Inaktiv' : 
+                   '⚠️ Ausgeschieden'}
+                </span></p>
               </div>
+
+              {/* Ausscheiden-Info wenn ausgeschieden */}
+              {showDetailModal.status === 'ausgeschieden' && (
+                <div className="bg-red-50 border-2 border-red-300 rounded p-4">
+                  <h4 className="font-semibold text-red-900 mb-3">⚠️ Ausgeschieden</h4>
+                  <div className="space-y-2 text-sm">
+                    <p>
+                      <strong className="text-red-800">Datum:</strong>{' '}
+                      <span className="text-red-700">
+                        {showDetailModal.ausgeschieden_am 
+                          ? new Date(showDetailModal.ausgeschieden_am).toLocaleDateString('de-DE')
+                          : '-'}
+                      </span>
+                    </p>
+                    <p>
+                      <strong className="text-red-800">Grund:</strong>{' '}
+                      <span className="text-red-700">{showDetailModal.ausgeschieden_grund || '-'}</span>
+                    </p>
+                    {showDetailModal.loeschbar_ab && (
+                      <p>
+                        <strong className="text-red-800">Löschbar ab:</strong>{' '}
+                        <span className="text-red-700">
+                          {new Date(showDetailModal.loeschbar_ab).toLocaleDateString('de-DE')}
+                          {' '}
+                          ({Math.ceil((new Date(showDetailModal.loeschbar_ab) - new Date()) / (1000 * 60 * 60 * 24))} Tage)
+                        </span>
+                      </p>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {showDetailModal.status !== 'ausgeschieden' && (
               <div className="bg-gray-50 rounded p-4">
                 <h4 className="font-semibold text-gray-900 mb-2">Urlaubsberechnung</h4>
                 <div className="text-sm text-gray-600 space-y-1">
@@ -389,10 +758,130 @@ export default function Personalverwaltung() {
                   <p className="font-semibold text-gray-900">= Resturlaub: {getResturlaub(showDetailModal)} Tage</p>
                 </div>
               </div>
+              )}
             </div>
             <div className="p-4 border-t flex gap-2">
-              {isAdmin && (<><button onClick={() => handleEdit(showDetailModal)} className="flex-1 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded font-semibold">Bearbeiten</button><button onClick={() => handleDelete(showDetailModal.id)} className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded font-semibold">Loeschen</button></>)}
-              <button onClick={() => setShowDetailModal(null)} className="flex-1 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded font-semibold">Schliessen</button>
+              {isAdmin && showDetailModal.status !== 'ausgeschieden' && (
+                <>
+                  <button onClick={() => handleEdit(showDetailModal)} className="flex-1 bg-orange-500 hover:bg-orange-600 text-white px-4 py-2 rounded font-semibold">
+                    Bearbeiten
+                  </button>
+                  <button onClick={() => setShowAusscheidenModal(showDetailModal)} className="bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded font-semibold">
+                    Ausscheiden
+                  </button>
+                  <button onClick={() => handleDelete(showDetailModal.id)} className="bg-gray-700 hover:bg-gray-800 text-white px-4 py-2 rounded font-semibold">
+                    Löschen
+                  </button>
+                </>
+              )}
+              {isAdmin && showDetailModal.status === 'ausgeschieden' && (
+                <button onClick={() => handleDelete(showDetailModal.id)} className="flex-1 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded font-semibold">
+                  🗑️ Endgültig löschen
+                </button>
+              )}
+              <button onClick={() => setShowDetailModal(null)} className="flex-1 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded font-semibold">
+                Schliessen
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* Ausscheiden Modal */}
+      {showAusscheidenModal && (
+        <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
+          <div className="bg-white rounded-lg shadow-2xl max-w-lg w-full">
+            <div className="bg-red-500 text-white p-6 rounded-t-lg">
+              <h2 className="text-2xl font-bold">⚠️ Mitarbeiter als ausgeschieden markieren</h2>
+              <p className="text-red-100 mt-2">
+                {showAusscheidenModal.vorname} {showAusscheidenModal.nachname}
+              </p>
+            </div>
+
+            <div className="p-6 space-y-4">
+              <div className="bg-yellow-50 border-2 border-yellow-300 rounded p-4">
+                <p className="text-yellow-800 text-sm">
+                  <strong>ℹ️ Wichtig:</strong> Der Mitarbeiter wird als "Ausgeschieden" markiert und:
+                </p>
+                <ul className="text-yellow-700 text-sm mt-2 ml-4 list-disc space-y-1">
+                  <li>Erscheint nicht mehr in aktiven Listen</li>
+                  <li>Login-Account wird deaktiviert</li>
+                  <li>Daten werden 6 Jahre aufbewahrt (gesetzliche Pflicht)</li>
+                  <li>Nach 6 Jahren löschbar</li>
+                </ul>
+              </div>
+
+              <div>
+                <label className="block text-gray-700 font-semibold mb-2">
+                  Ausscheidedatum *
+                </label>
+                <input
+                  type="date"
+                  value={ausscheidenData.datum}
+                  onChange={(e) => setAusscheidenData({ ...ausscheidenData, datum: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                  required
+                />
+              </div>
+
+              <div>
+                <label className="block text-gray-700 font-semibold mb-2">
+                  Grund *
+                </label>
+                <select
+                  value={ausscheidenData.grund}
+                  onChange={(e) => setAusscheidenData({ ...ausscheidenData, grund: e.target.value })}
+                  className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white mb-2"
+                  required
+                >
+                  <option value="">-- Bitte wählen --</option>
+                  <option value="Kündigung (Arbeitnehmer)">Kündigung durch Arbeitnehmer</option>
+                  <option value="Kündigung (Arbeitgeber)">Kündigung durch Arbeitgeber</option>
+                  <option value="Aufhebungsvertrag">Aufhebungsvertrag</option>
+                  <option value="Befristung ausgelaufen">Befristung ausgelaufen</option>
+                  <option value="Rente">In Rente gegangen</option>
+                  <option value="Tod">Verstorben</option>
+                  <option value="Probezeit">Probezeit nicht bestanden</option>
+                  <option value="Sonstiges">Sonstiges</option>
+                </select>
+
+                {ausscheidenData.grund === 'Sonstiges' && (
+                  <textarea
+                    placeholder="Bitte Grund näher beschreiben..."
+                    className="w-full px-4 py-2 border border-gray-300 rounded text-gray-900 bg-white"
+                    rows="3"
+                  />
+                )}
+              </div>
+
+              {ausscheidenData.datum && (
+                <div className="bg-blue-50 border border-blue-200 rounded p-3">
+                  <p className="text-blue-800 text-sm">
+                    <strong>📅 Löschbar ab:</strong>{' '}
+                    {new Date(new Date(ausscheidenData.datum).setFullYear(new Date(ausscheidenData.datum).getFullYear() + 6)).toLocaleDateString('de-DE')}
+                    {' '}(in 6 Jahren)
+                  </p>
+                </div>
+              )}
+            </div>
+
+            <div className="p-4 border-t flex gap-2">
+              <button
+                onClick={() => {
+                  setShowAusscheidenModal(null)
+                  setAusscheidenData({ datum: new Date().toISOString().split('T')[0], grund: '' })
+                }}
+                className="flex-1 bg-gray-500 hover:bg-gray-600 text-white px-4 py-2 rounded font-semibold"
+              >
+                Abbrechen
+              </button>
+              <button
+                onClick={handleAusscheiden}
+                disabled={!ausscheidenData.datum || !ausscheidenData.grund}
+                className="flex-1 bg-red-500 hover:bg-red-600 text-white px-4 py-2 rounded font-semibold disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                ⚠️ Als ausgeschieden markieren
+              </button>
             </div>
           </div>
         </div>

@@ -10,6 +10,12 @@ export const getUserRole = async (userId) => {
       .single()
 
     if (error) return null
+    
+    // WICHTIG: Deaktivierte Accounts blockieren
+    if (data?.role === 'deaktiviert') {
+      return null // Behandle wie "keine Rolle" = kein Zugriff
+    }
+    
     return data?.role || 'haustechniker'
   } catch (err) {
     console.error('Fehler beim Abrufen der Rolle:', err)
